@@ -1,0 +1,6 @@
+# Core pipeline requires only Python's standard library.
+# Optional: PDF text extraction
+pypdf>=5.0.0
+# Optional: image OCR (also requires the Tesseract system binary)
+Pillow>=10.0.0
+pytesseract>=0.3.13

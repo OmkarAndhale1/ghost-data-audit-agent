@@ -1,0 +1,8 @@
+{
+  "dataset_dir": "./dataset",
+  "requests_file": "deletion_requests.csv",
+  "output_file": "./output.csv",
+  "optional_pdf_extraction": true,
+  "optional_image_ocr": true,
+  "external_model_calls": false
+}
