@@ -315,16 +315,26 @@ def run_pipeline(data_dir: Path, output_path: Path, request_filename: str = "del
             if audit and dt(a.get("event_time")) and dt(a["event_time"])>audit: continue
             if a.get("resource_id") in resource_ids or any(v and v in norm(a.get("details")) for v in identifiers):
                 act_relevant.append(a)
-        # Deduplicate observations by resource/system, retaining the latest observation at or before audit time.
-        grouped={}
+        # Temporal reconciliation: within each system+category the most recently
+        # captured evidence at or before audit_at supersedes older snapshots. Keep
+        # every matched record from that decisive capture so stale snapshot copies
+        # (replicas, historical bundles, old readback traces) do not add phantom
+        # steps for resources that have since been superseded.
+        by_group=defaultdict(list)
         for row,system,cat,state in relevant:
-            key=(system,row["resource_id"],cat)
-            old=grouped.get(key)
-            # Evidence manifest order approximates recency; favor the row with later observed/captured time.
-            observed=dt(row.get("data",{}).get("observed_at") or row.get("data",{}).get("captured_at") or row.get("data",{}).get("updated_at"))
-            score=(observed.timestamp() if observed else 0, int(row["evidence_id"].split("_")[-1]))
-            if old is None or score>old[0]: grouped[key]=(score,row,system,cat,state)
-        chosen=[v[1:] for v in grouped.values()]
+            by_group[(system,cat)].append((row,system,cat,state))
+
+        def capture_rank(item):
+            rel=item[0].get("path")
+            mr=manifest_rows.get(rel)
+            cap=dt(mr.get("captured_at")) if mr else None
+            # Later capture wins; the evidence id breaks ties deterministically.
+            return (cap.timestamp() if cap else 0.0, int(item[0]["evidence_id"].split("_")[-1]))
+
+        chosen=[]
+        for items in by_group.values():
+            decisive=max(items,key=capture_rank)[0]["evidence_id"]
+            chosen.extend(item for item in items if item[0]["evidence_id"]==decisive)
         # Resource states/rules: expose PII records, active flows, restore risks, and records explicitly required retained.
         findings=[]; remediation=[]; verification=[]
         found_account=False
@@ -411,6 +421,20 @@ def run_pipeline(data_dir: Path, output_path: Path, request_filename: str = "del
             # Do not claim unobserved future operations as completed. Sort and number by contract.
             steps=findings+remediation+verification
             # Verification after remediation should cover each proposed action; account absence remains a current-state check.
+        # Collapse repeated (phase, system, resource, operation, state) observations so the
+        # same logical step is not emitted once per historical snapshot.
+        seen=set(); unique_steps=[]
+        for s in steps:
+            key=(s["phase"],s["system_id"],s["resource_id"],s["operation"],s["state"])
+            if key in seen: continue
+            seen.add(key); unique_steps.append(s)
+        steps=unique_steps
+        if not steps:
+            # An empty step array is only valid for NOT_APPLICABLE. When no concrete evidence
+            # is matched we cannot assert completion, so record the outstanding account lookup
+            # as a planned verification step rather than emitting an INCOMPLETE row with no steps.
+            status="INCOMPLETE"
+            steps=[make_step("VERIFICATION","account_service","","VERIFY_RECORD_ABSENT","ABSENT")]
         steps.sort(key=lambda s:(PHASE_ORDER[s["phase"]],OP_ORDER[s["phase"]].get(s["operation"],99),s["system_id"],s["resource_id"]))
         # Ensure complete cases only have verification and all incomplete future steps have empty evidence ids.
         if status=="INCOMPLETE":
